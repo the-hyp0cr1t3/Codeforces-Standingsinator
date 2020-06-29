@@ -70,7 +70,6 @@ FOOTER_TEXT
 
 """
 
-
 class User:
     def __init__(self, _handle, _name, _ranksz):
         self.handle = _handle
