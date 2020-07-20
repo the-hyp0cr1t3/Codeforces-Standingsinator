@@ -2,7 +2,8 @@ import requests
 import json
 import os
 import sys
-import csv
+import pandas as pd
+from collections import defaultdict
 
 # Constants
 INF = 2000000000
@@ -15,18 +16,24 @@ FOOTER_TEXT = "If you're eligible for the standings list(s) " \
 # File specific paths
 HANDLES_DIR = 'CF Handles'
 SEP_DIR = 'CF Handles\\Separate Lists'
-OUTPUT_FILE_PATH = 'Output.txt'
+OUTPUT_FILE = 'Output.txt'
 
 # Options
-# LIST_LENGTHS specifies desired the length of each standings list
-    # LIST_LENGTHS[0] = length of Overall standings list
-    # LIST_LENGTHS[1] = length of Rated participants standings list
-    # Index 2 onwards correspond to spearate lists
-LIST_LENGTHS = [10, 10, 5]
+LISTS = ['Overall', 'Rated', 'Summer Group']
+LIST_LENGTH = {'Overall': 10, 'Rated': 10, 'Summer Group': 5}
 OVERALL_LEN_IF_S = 5        # Length of overall list if 's'
 ONLY_OFFICIAL_RANKS_FOR_RATED = False
+FIELDS = ['handle', 'name', 'rating', 'maxrank']
+RANKS = ['urank', 'orank']
 
 """
+CSV file format:=
+handle,name,rating,maxrank
+the_hyp0cr1t3,Hriday,2024,candidate master
+.
+.
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Input format:= 
 Contest_ID options Contest_ID options...
 
@@ -34,11 +41,13 @@ Single space separated list of arguements.
 'Options' include single character 's' and/or 'o'
     'o' => to also display [official rank]
     's' => to also display rated participants list
-    '-{handle}' => exclude particular handles
+    '-c or -commit' => to commit changes/updates to files
+    '-{handle}' => to exclude particular handles
 Options may or may not be specified.
 
-Eg: 1220 o 1340 s 1332 234 s o -the_hyp0cr1t3
+Eg: 1220 o 1340 s 1332 234 s o -the_hyp0cr1t3 -commit
 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Output Format:=
 Writes to OUTPUT_FILE_PATH (Output.txt)
 
@@ -66,27 +75,12 @@ CONTEST_2 NAME
 .
 .
 
+Congratulations to @name on becoming Expert!
+Congratulations to @name, @name and @name on becoming Master!
+
 FOOTER_TEXT
 
 """
-
-class User:
-    def __init__(self, _handle, _name, _ranksz):
-        self.handle = _handle
-        self.name = _name
-        self.mask = 1
-        self.ranksz = _ranksz
-        self.reset()
-
-    def trace(self):
-        print(self.handle, self.urank, self.orank, self.mask)
-        print(self.ranklists)
-
-    def reset(self):
-        self.urank = INF
-        self.orank = INF
-        self.ranklists = [INF for i in range(self.ranksz)]
-
 
 class Contest_info:
     def __init__(self, IDno):
@@ -95,51 +89,123 @@ class Contest_info:
         self.rated_sep = False
         self.name = 'uninit'
 
+# Output write methods
+def write_header():
+    # Clear and write header text
+    with open(OUTPUT_FILE, 'w') as file:
+        file.write(HEADER_TEXT + '\n')
+
+def write_lists(contest, standings, df):
+    # Write each LIST to file in appropriate format
+    with open(OUTPUT_FILE, 'a') as file:
+        # Contest name
+        file.write(contest.name+'\n')
+
+        for category in LISTS:
+            # Skip if category is RATED and 's' is not specified
+            if category == 'Rated' and not contest.rated_sep: continue
+
+            if len(standings[category]):
+                # List name
+                file.write(category+' Standings\n')
+
+                for handle in standings[category]:
+                    # 1. @name (handle) (unofficial rank) [official rank]
+                    # 2. @name (handle) (unofficial rank) [official rank]
+                    file.write(f'{df.loc[handle, category]}.'\
+                            f" {AT}{df.loc[handle, 'name']} ({handle}) ")
+                    df.loc[handle, category] = True
+
+                    if not ONLY_OFFICIAL_RANKS_FOR_RATED:
+                        file.write(f"({df.loc[handle, 'urank']}) ")
+
+                    if contest.isofficial or category == 'Rated':
+                        if df.loc[handle, 'orank'] == INF: df.loc[handle, 'orank'] = '-'
+                        file.write(f"[{df.loc[handle, 'orank']}]")
+
+                    file.write('\n')
+
+                file.write('\n')
+
+    return df
+
+def write_congrats(congo):
+    # Write congratulatory text
+    # for all those who increased their maxrank (eg: specialist -> expert).
+    with open(OUTPUT_FILE, 'a') as file:
+        for rank in congo:
+            file.write(f'Congratulations to {AT}')
+            if len(congo[rank]) >= 2:
+                file.write(f'{f", {AT}".join(congo[rank][:-1])} and {AT}')
+            file.write(f'{congo[rank][-1]} on reaching {rank}!\n\n')
+
+def write_footer():
+    # Write footer text
+    with open(OUTPUT_FILE, 'a') as file:
+        file.write(FOOTER_TEXT + '\n')
+
+# File read methods
+def new_row(df_row):
+    # {handle}, {name}..., {Overall:T/F}, ...LISTS
+    row = [df_row[x] for x in FIELDS] + [False] * len(LISTS)
+    return row[1:]
+
+def add_folder(category, path, df):
+    # Add all csv files in a folder (path)
+    for year in os.listdir(path):
+        if year[-4:] == '.csv':
+            df1 = pd.read_csv(path+'\\'+year)
+
+            for i, row in df1.iterrows():
+                if row['handle'] not in df.index:
+                    df.loc[row['handle']] = new_row(row)
+            
+                df.loc[row.handle, category] = True
+
+    return df
 
 def load_handles():
-    # List of User objects
-    handles = []
-    # Dict with key = handle, val = index of handle in list of handles
-    handle_ID = {}
+    # df columns = handles(key), FIELDS.., LISTS..., RANKS... 
+    df = pd.DataFrame(columns=FIELDS+LISTS)
+    df.set_index('handle', inplace=True)
 
-    sep_categories = os.listdir(SEP_DIR)        # read all files in SEP dir
-    rank_count = len(sep_categories) + 2
+    df = add_folder('Overall', HANDLES_DIR, df)
+    
+    for category in os.listdir(SEP_DIR):            
+        df = add_folder(category, SEP_DIR+'\\'+category, df)
+    
+    df['Overall'] = True
+    return df
 
-    years = os.listdir(HANDLES_DIR)     # read all files in HANDLES dir
-    for year in years:                  # and add to handles
+# File write and update methods
+def update_folder(path, df):
+    # Update all csv files in a folder with corresponding updated data from df
+    for year in os.listdir(path):
         if year[-4:] == '.csv':
-            with open(HANDLES_DIR+'\\'+year, 'r') as file:
-                reader = csv.reader(file, delimiter=',')
-                for row in reader:
-                    handle_ID[row[0]] = len(handles)
-                    handles.append(User(row[0], row[1], rank_count))
+            df1 = pd.read_csv(path+'\\'+year)
+            df1['rating'] = 0
+            df1['maxrank'] = 'uninit'
+            df1.set_index('handle', inplace=True)
 
-    for category in sep_categories:             # add each SEP handle under
-        years = os.listdir(SEP_DIR+'\\'+category)      # respective category
-        temp = {}
-        for year in years:
-            if year[-4:] == '.csv':
-                with open(SEP_DIR+'\\'+category+'\\'+year, 'r') as file:
-                    reader = csv.reader(file, delimiter=',')
-                    for row in reader:
-                        if row[0] not in handle_ID:
-                            handle_ID[row[0]] = len(handles)
-                            handles.append(User(row[0], row[1], rank_count))
-                        handles[handle_ID[row[0]]].mask |= (1<<(sep_categories.index(category)+1))
+            for handle, row in df1.iterrows():      # updating each row
+                df1.loc[handle, df1.columns] = df.loc[handle, df1.columns]
+            
+            df1 = df1.fillna(0)        # Some NaN complaints when casting to int32
+            df1.astype({'rating': 'int32'}).dtypes
+            df1.to_csv(path+'\\'+year)
 
-    return handles, sep_categories, rank_count
+def update_all_files(df):
+    # Write df to each file in appropriate locations
+    update_folder(HANDLES_DIR, df)
+    for category in os.listdir(SEP_DIR):
+        update_folder(SEP_DIR+'\\'+category, df)
 
-
-def query_handles(contest_id, handles, opt):
-    # Read handles of all users from file,
-    # concatenate with url request string,
-    # send request to CF API
-    # and finally return json response as a dict
-    url = 'https://codeforces.com/api/contest.standings?'\
-        f'contestId={contest_id}&showUnofficial={opt}&handles='
-
-    for handle in handles:
-        url += handle.handle + ';'
+# CF API query and response methods
+def query_cfAPI(url, df):
+    # Append handles and send a HTTP request to the CF API
+    # return json response
+    for handle, row in df.iterrows():
+        url += handle + ';'
 
     try:
         response = requests.get(url)
@@ -159,180 +225,166 @@ def query_handles(contest_id, handles, opt):
 
     return json.loads(response.text)
 
-
-def update(handles, handle_ID, json_response, isofficial):
+def update_ranks(df, json_response, isofficial):
+    # update df RANKS with the json response
     for user in json_response['result']['rows']: 
         handle = user['party']['members'][0]['handle']
         participant_type = user['party']['participantType']
         
-        if (handle not in handle_ID or
-                participant_type == "PRACTICE" or
-                participant_type == "VIRTUAL"):
-            continue
+        good = (handle in df.index
+                and participant_type != "PRACTICE"
+                and participant_type != "VIRTUAL")
+        if good:
+            df.loc[handle, 'orank' if isofficial else 'urank'] = int(user['rank'])
 
-        if isofficial:
-            handles[handle_ID[handle]].orank = int(user['rank'])
-        else:
-            handles[handle_ID[handle]].urank = int(user['rank'])
+    return df
 
-    return handles
+def update_df(df, json_response):
+    # Update df with user.info from the query as well as
+    # check for mismatches between maxrank in file (i.e. df) and maxrank from query
+    # All such mismatches populated in congo
+    congo = defaultdict(list)      # congo[rank] = [names..]
 
+    for user in json_response['result']: 
+        handle = user['handle']
+        try:
+            rating = user['rating']     # unrated user.info json objects do not have "rating" field
+            maxrank = user['maxRank']
+        except:
+            rating = 0
+            maxrank = 'unrated'
+        
+        if df.loc[handle, 'maxrank'] != maxrank:
+            congo[maxrank].append(df.loc[handle, 'name'])
 
-def select(handles, mask, rank_no, list_len):
-    standings_list = []
+        df.loc[handle, ['rating', 'maxrank']] = [rating, maxrank]
+
+    return congo, df
+
+# Standings extraction methods
+def select(column, df, list_len):
+    # Pick the top {list_len} handles from the sorted df
+    standings_list = []     # List of handles
+    local_rank = 0          # Rank within this list
     previous_rank = -1
-    current_rank = 0
-    for handle in handles:
-        rank = handle.orank if rank_no == 1 else handle.urank
+
+    for handle, row in df.iterrows():
+        # Only if True
+        if row[column] == False: continue
+        # Official rank or unofficial ranlk
+        rank = row['orank'] if column == 'Rated' else row['urank']
+        # Break if length exceeds and there is no tie for last place
         if len(standings_list) >= list_len and rank > previous_rank: break
+        # Skip if rank does not exist
         if rank == INF: continue
-        if handle.mask & mask == 0: continue
+        # If not a tie, advance local rank
         if rank != previous_rank:
-            current_rank += 1
-        handle.ranklists[rank_no] = current_rank
+            local_rank += 1
+        # Update cell from True to local rank
+        df.loc[handle, column] = local_rank
+        # Append handle to list
         standings_list.append(handle)
         previous_rank = rank
 
-    return standings_list
+    return df, standings_list
 
+def get_standings(contest, df):
+    # get CF API contest.standings (unofficial)
+    url = 'https://codeforces.com/api/contest.standings?'\
+        f'contestId={contest.ID}&showUnofficial=true&handles='
 
-def write_tofile(contest, standings):
-    with open(OUTPUT_FILE_PATH, 'a') as file:
-        file.write(contest.name+'\n')        
-        rank_no = 0
+    json_response = query_cfAPI(url, df)
+    df = update_ranks(df, json_response, False)
 
-        for category in standings:
-            if len(standings[category]):
-                file.write(category+' Standings\n')
+    # get CF API contest.standings (official)
+    url = 'https://codeforces.com/api/contest.standings?'\
+        f'contestId={contest.ID}&showUnofficial=false&handles='
 
-                for handle in standings[category]:
-                    file.write(f'{handle.ranklists[rank_no]}.'\
-                            f' {AT}{handle.name} ({handle.handle}) ')
+    json_response = query_cfAPI(url, df)
+    df = update_ranks(df, json_response, True)
 
-                    if not ONLY_OFFICIAL_RANKS_FOR_RATED:
-                        file.write(f'({handle.urank}) ')
+    # Rated is true only if official rank exists
+    df['Rated'] = [(False if val == INF else True) for val in df['orank']]
 
-                    if contest.isofficial or category == 'Rated':
-                        if handle.orank == INF: handle.orank = '-'
-                        file.write(f'[{handle.orank}]')
+    # Sort by unofficial, official ranks
+    df.sort_values(by=RANKS, inplace=True)
 
-                    file.write('\n')
+    standings = {}  # standings['Overall'] = list of handles, etc
 
-                file.write('\n')
-
-            rank_no += 1
-
-    return
-
-
-def run(contest, handles, handle_ID, sep_categories):
-    json_response = query_handles(contest.ID, handles, 'true')
-    handles = update(handles, handle_ID, json_response, False)
-
-    json_response = query_handles(contest.ID, handles, 'false')
-    handles = update(handles, handle_ID, json_response, True)
-
-    handles.sort(key = lambda x: x.urank)
-
-    standings = {}
-    
-    rank_no = 0
-    list_len = OVERALL_LEN_IF_S if contest.rated_sep else LIST_LENGTHS[rank_no]
-
-    standings['Overall'] = select(handles, 1, rank_no, list_len)
-
-    rank_no += 1
-
-    if contest.rated_sep:
-        standings['Rated'] = select(handles, 1, rank_no, LIST_LENGTHS[rank_no])
-    else:
-        standings['Rated'] = []
-
-    for category in sep_categories:
-        rank_no += 1
-        mask = (1<<(rank_no-1))
-        standings[category] = select(handles, mask, rank_no, LIST_LENGTHS[rank_no])
-    
+    for column in df.columns:
+        # for each standings list, retrieve top x handles (specified by LIST_LENGTH)
+        # and update df[handle, this list] with the local rank in this list
+        if column not in FIELDS and column not in RANKS:
+            list_len = (OVERALL_LEN_IF_S 
+                        if column == 'Overall' and contest.rated_sep
+                        else LIST_LENGTH[column])
+            df, standings[column] = select(column, df, list_len)
+        
     contest.name = json_response['result']['contest']['name']
-
-    write_tofile(contest, standings)
-
+    df = write_lists(contest, standings, df)
     print(contest.name)
-    return
-
-
-def write_header():
-    with open(OUTPUT_FILE_PATH, 'w') as file:
-        file.write(HEADER_TEXT + '\n')
-    
-
-def write_footer():
-    with open(OUTPUT_FILE_PATH, 'a') as file:
-        file.write(FOOTER_TEXT + '\n')
-
+    return df
 
 def main():
-    # List of Contest_info objects
-    contests = []
-
-    # Handles to exclude
-    exclude = []
-
-    # Input string is space separated, terminated by newline
+    contests = []   # List of Contest_info objects
+    exclude = []    # Handles to exclude
+    commit = False
     inp = input()
 
     for field in inp.split():
-        # Each number is taken as a separate contest object
-        # optional parameters 'o' for official and 's' 
-        # for ranked separately are scanned for until the next
-        # contest number or new line
+        # contest ID
         if field.isnumeric():
             contests.append(Contest_info(field))
+        # commit
+        elif field == '-c' or field == '-commit':
+            commit = True
+        # exclude
         elif field[0] == '-':
             exclude.append(field[1:])
+        # display official ranks
         elif len(contests) and field == 'o':
             contests[-1].isofficial = True
+        # display rated list separately
         elif len(contests) and field == 's':
             contests[-1].rated_sep = True
 
-    if len(contests) == 0:
-        exit('No IDs found')
-
-    handles, sep_categories, rank_count = load_handles()
+    # load handles from all files into a DataFrame
+    df = load_handles()
 
     for handle in exclude:
-        toremove = None
-        for user in handles:
-            if user.handle == handle:
-                toremove = user
-                break
-        if toremove is None:
-            print(f'{handle} not found')
-        else:
-            handles.remove(toremove)
+        df.drop(handle, inplace=True)
 
     # CF API accepts upto 10000 handles in a single request
-    assert(len(handles) <= 10000), "Handle limit exceeded"
+    assert(len(df) <= 10000), "Handle limit exceeded"
 
-    # List of list-lengths should be valid
-    assert(len(LIST_LENGTHS) == rank_count), "LIST_LENGTHS do not match"
+    for column in df.columns:
+            assert(column in FIELDS
+                    or column in LISTS
+                    or column in RANKS), f'{column} not found'
 
-    write_header()
+    if len(contests): write_header()
     
     for contest in contests:
-        idx = 0
-        handle_ID = {}
-        for handle in handles: 
-            handle.reset()
-            handle_ID[handle.handle] = idx
-            idx += 1
-        run(contest, handles, handle_ID, sep_categories)
+        for field in RANKS: df[field] = INF     # Reset ranks to INF
+        df = get_standings(contest, df)
 
-    write_footer()
+    # query CF API for user info of all handles
+    url = 'https://codeforces.com/api/user.info?handles='
+    json_response = query_cfAPI(url, df)
 
-    print("Success")
+    # Update df and get the congo (congrats) list
+    congo, df = update_df(df, json_response)
+
+    if len(contests):
+        write_congrats(congo)   # Congratulatory messages
+        write_footer()
+
+    if commit: 
+        update_all_files(df)
+        print('committed')
+
+    print('Success')
     return
-
 
 if __name__ == "__main__":
     main()
